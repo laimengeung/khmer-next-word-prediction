@@ -1,6 +1,6 @@
-"""Export an LSTM checkpoint for the offline web demo in web/.
+"""Export an LSTM checkpoint for the offline web demo in docs/ (served by GitHub Pages).
 
-Writes web/model.onnx (input: int64 ids [1, T] -> output: next-word logits [V]) and web/vocab.json (itos).
+Writes docs/model.onnx (input: int64 ids [1, T] -> output: next-word logits [V]) and docs/vocab.json (itos).
 Usage: python export_web.py [checkpoint]   (default: models/best.pt)
 """
 import json
@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 
 CKPT = sys.argv[1] if len(sys.argv) > 1 else "models/best.pt"
-OUT = "web"
+OUT = "docs"
 
 
 class LSTMLanguageModel(nn.Module):  # same state_dict keys as script.ipynb / streamlit_app.py
