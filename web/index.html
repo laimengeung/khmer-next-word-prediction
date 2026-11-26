@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="km">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Khmer Autocomplete</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+Khmer:wght@400;600&display=swap">
+<style>
+  :root { --bg:#f2f2f7; --card:#fff; --text:#1c1c1e; --muted:#8e8e93; --chip:#d1d3d9; --accent:#0a84ff; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#000; --card:#1c1c1e; --text:#f2f2f7; --muted:#8e8e93; --chip:#3a3a3c; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family:"Noto Sans Khmer", system-ui, sans-serif; }
+  main { max-width:640px; margin:0 auto; padding:24px 16px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  p.sub { margin:0 0 16px; color:var(--muted); font-size:14px; }
+  textarea { width:100%; min-height:140px; padding:12px; border:0; border-radius:12px; resize:vertical;
+             background:var(--card); color:var(--text); font:inherit; font-size:20px; line-height:1.7; outline:none; }
+  #bar { display:flex; gap:1px; margin-top:8px; background:var(--chip); border-radius:10px; overflow:hidden; min-height:48px; }
+  #bar button { flex:1; min-width:0; border:0; background:var(--card); color:var(--text); font:inherit; font-size:18px;
+                padding:10px 4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer; }
+  #bar button.done { color:var(--accent); }
+  #bar button:active { background:var(--chip); }
+  #status { margin-top:10px; color:var(--muted); font-size:13px; min-height:1.5em; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Khmer Autocomplete</h1>
+  <p class="sub">LSTM next-word model running on this device. Tap a suggestion to insert it.</p>
+  <textarea id="box" placeholder="ខ្ញុំចង់ទៅ..." disabled></textarea>
+  <div id="bar" aria-live="polite"></div>
+  <div id="status">Loading model…</div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.min.js"></script>
+<script>
+const N_CHIPS = 3, MAX_CONTEXT = 64, ZWSP = "​";
+const box = document.getElementById("box"), bar = document.getElementById("bar"), statusEl = document.getElementById("status");
+let session, itos, stoi, blocked, maxLen;
+
+// --- text pipeline: mirrors clean_text / segment_sentence in streamlit_app.py ---
+// shortcut: greedy longest-match over the model vocab instead of khmer-nltk's CRF, so splits can differ from training;
+// port the CRF if suggestion quality on real typing is noticeably worse than in the notebook.
+const SENT_SPLIT = /[\n។៕?!]+/, ENDS_SENT = /[\n។៕?!]\s*$/;
+const INVISIBLE = /[‌‍﻿­឴឵]/g, KHMER_PUNCT = /[៖៘-៚]/g;
+const NON_KHMER = /[^ក-៿᧠-᧿0-9\s]+/g, KHMER_CHAR = /[ក-៿᧠-᧿]/, DIGITS = /^[0-9០-៩]+$/;
+
+// a word may only start/end where a new character cluster begins (base letter not preceded by coeng)
+const isBase = ch => ch >= "ក" && ch <= "ឳ" || /[0-9០-៩]/.test(ch);
+const isBoundary = (s, j) => j === s.length || (isBase(s[j]) && s[j - 1] !== "្");
+
+function longestMatch(piece) {
+  const out = []; let i = 0, unk = "";
+  while (i < piece.length) {
+    let j = Math.min(piece.length, i + maxLen), hit = -1;
+    for (; j > i; j--) if (isBoundary(piece, j) && stoi.has(piece.slice(i, j))) { hit = j; break; }
+    if (hit < 0) {                         // unknown cluster: glue it onto a pending <unk> chunk
+      let k = i + 1; while (!isBoundary(piece, k)) k++;
+      unk += piece.slice(i, k); i = k; continue;
+    }
+    if (unk) { out.push(unk); unk = ""; }
+    out.push(piece.slice(i, hit)); i = hit;
+  }
+  if (unk) out.push(unk);
+  return out;
+}
+
+function segment(sentence) {
+  const chunk = sentence.normalize("NFC").replaceAll(ZWSP, " ").replace(INVISIBLE, "")
+    .replace(NON_KHMER, " ").replace(KHMER_PUNCT, " ");
+  const toks = [];
+  for (const piece of chunk.split(/\s+/).filter(Boolean))
+    for (const t of DIGITS.test(piece) ? [piece] : longestMatch(piece)) {
+      if (DIGITS.test(t)) { if (toks.at(-1) !== "<num>") toks.push("<num>"); }
+      else toks.push(t);
+    }
+  return KHMER_CHAR.test(chunk) ? toks : [];
+}
+
+// returns { prev: ids of finished sentences, cur: tokens of the sentence being typed }
+function encode(text) {
+  const sents = text.split(SENT_SPLIT), ended = ENDS_SENT.test(text);
+  const done = ended ? sents : sents.slice(0, -1), prev = [stoi.get("<eos>")];
+  for (const s of done) { const t = segment(s); if (t.length) prev.push(...t.map(id), stoi.get("<eos>")); }
+  return { prev, cur: ended ? [] : segment(sents.at(-1)) };
+}
+const id = w => stoi.get(w) ?? stoi.get("<unk>");
+
+// --- model ---
+async function scores(ids) {
+  ids = ids.slice(-MAX_CONTEXT);
+  const t = new ort.Tensor("int64", BigInt64Array.from(ids, BigInt), [1, ids.length]);
+  const logits = (await session.run({ ids: t })).logits.data;
+  for (const b of blocked) logits[b] = -Infinity;
+  return logits;
+}
+const topK = (logits, k, keep = () => true) =>
+  [...logits.keys()].filter(i => logits[i] > -Infinity && keep(itos[i])).sort((a, b) => logits[b] - logits[a]).slice(0, k).map(i => itos[i]);
+
+// --- suggestions ---
+let runId = 0;
+async function update() {
+  const my = ++runId, text = box.value;
+  const { prev, cur } = encode(text);
+  const typingWord = cur.length && !/[\s​]$/.test(text);
+  let chips = [];
+
+  if (typingWord) {
+    // the word being typed may span the last 1-3 segments ("កម្ព" -> "ក" + "ម្ព"); use the longest one that has completions
+    for (let n = Math.min(3, cur.length); n >= 1 && !chips.length; n--) {
+      const partial = cur.slice(-n).join("");
+      const ctx = [...prev, ...cur.slice(0, -n).map(id)];
+      const words = topK(await scores(ctx), N_CHIPS, w => w.length > partial.length && w.startsWith(partial));
+      chips = words.map(w => ({ word: w, replace: partial }));
+    }
+  }
+  if (chips.length < N_CHIPS && (!typingWord || stoi.has(cur.at(-1)))) {   // fill with next-word predictions
+    const next = topK(await scores([...prev, ...cur.map(id)]), N_CHIPS, w => !chips.some(c => c.word === w));
+    chips.push(...next.slice(0, N_CHIPS - chips.length).map(w => ({ word: w, replace: "" })));
+  }
+  if (my !== runId) return;                // a newer keystroke already started
+  render(chips);
+}
+
+function render(chips) {
+  bar.replaceChildren(...chips.map(c => {
+    const b = document.createElement("button");
+    b.textContent = c.word;
+    if (c.replace) b.className = "done";
+    b.onclick = () => {
+      const v = box.value;
+      box.value = v.slice(0, v.length - c.replace.length) + c.word + ZWSP;   // ZWSP marks the word boundary
+      box.focus(); update();
+    };
+    return b;
+  }));
+}
+
+(async () => {
+  try {
+    ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/";
+    [itos, session] = await Promise.all([
+      fetch("vocab.json").then(r => r.json()),
+      ort.InferenceSession.create("model.onnx", { executionProviders: ["wasm"] }),
+    ]);
+    stoi = new Map(itos.map((w, i) => [w, i]));
+    blocked = ["<pad>", "<unk>", "<eos>", "<num>"].map(w => stoi.get(w)).filter(i => i !== undefined);
+    maxLen = Math.max(...itos.map(w => w.length));
+    box.disabled = false; box.addEventListener("input", update);
+    statusEl.textContent = `Ready · ${itos.length.toLocaleString()} words`;
+    update();
+  } catch (e) {
+    statusEl.textContent = "Could not load the model: " + e.message;
+  }
+})();
+</script>
+</body>
+</html>
