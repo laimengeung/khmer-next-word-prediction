@@ -4,7 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Khmer Autocomplete</title>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+Khmer:wght@400;600&display=swap">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="theme-color" content="#000000">
+<!-- crossorigin makes the font CSS a readable response, so the service worker can save it for offline use -->
+<link rel="stylesheet" crossorigin="anonymous" href="https://fonts.googleapis.com/css2?family=Noto+Sans+Khmer:wght@400;600&display=swap">
 <style>
   :root { --bg:#f2f2f7; --card:#fff; --text:#1c1c1e; --muted:#8e8e93; --chip:#d1d3d9; --accent:#0a84ff; }
   @media (prefers-color-scheme: dark) { :root { --bg:#000; --card:#1c1c1e; --text:#f2f2f7; --muted:#8e8e93; --chip:#3a3a3c; } }
@@ -137,6 +141,8 @@ function render(chips) {
     return b;
   }));
 }
+
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});  // offline support
 
 (async () => {
   try {
