@@ -1,0 +1,3 @@
+# web demo model files are hosted on Hugging Face (laimengeung/khmer-lstm-nextword)
+docs/model.onnx
+docs/vocab.json

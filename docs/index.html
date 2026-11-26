@@ -35,6 +35,8 @@
 <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.min.js"></script>
 <script>
 const N_CHIPS = 3, MAX_CONTEXT = 64, ZWSP = "​";
+// model + vocab live on Hugging Face (export with export_web.py, then upload both files together)
+const MODEL_REPO = "https://huggingface.co/laimengeung/khmer-lstm-nextword/resolve/main/";
 const box = document.getElementById("box"), bar = document.getElementById("bar"), statusEl = document.getElementById("status");
 let session, itos, stoi, blocked, maxLen;
 
@@ -140,8 +142,8 @@ function render(chips) {
   try {
     ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/";
     [itos, session] = await Promise.all([
-      fetch("vocab.json").then(r => r.json()),
-      ort.InferenceSession.create("model.onnx", { executionProviders: ["wasm"] }),
+      fetch(MODEL_REPO + "vocab.json").then(r => r.json()),
+      ort.InferenceSession.create(MODEL_REPO + "model.onnx", { executionProviders: ["wasm"] }),
     ]);
     stoi = new Map(itos.map((w, i) => [w, i]));
     blocked = ["<pad>", "<unk>", "<eos>", "<num>"].map(w => stoi.get(w)).filter(i => i !== undefined);
